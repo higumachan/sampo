@@ -98,6 +98,7 @@ struct SampoApp {
     is_calibrating: bool,
     text_color: egui::Color32,
     scroll_offset: egui::Vec2,
+    needs_scroll_reset: bool,
 }
 
 impl Default for SampoApp {
@@ -116,6 +117,7 @@ impl Default for SampoApp {
             is_calibrating: false,
             text_color: egui::Color32::WHITE,
             scroll_offset: egui::Vec2::ZERO,
+            needs_scroll_reset: false,
         }
     }
 }
@@ -187,6 +189,7 @@ impl SampoApp {
                 self.calibration_state = CalibrationState::Idle;
                 self.is_calibrating = false;
                 self.zoom = 1.0;
+                self.needs_scroll_reset = true;
             }
             Err(e) => {
                 eprintln!("Failed to load image: {}", e);
@@ -629,6 +632,12 @@ impl eframe::App for SampoApp {
 
             // パディングはviewport_sizeと同じ
             let padding = viewport_size;
+
+            // 画像読み込み時にスクロール位置をリセット（画像左上が画面左上に来るように）
+            if self.needs_scroll_reset {
+                self.scroll_offset = padding;
+                self.needs_scroll_reset = false;
+            }
 
             if zoom_delta != 1.0 && self.image_texture.is_some() {
                 if let Some(pointer) = pointer_pos {
