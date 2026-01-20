@@ -63,7 +63,10 @@ impl Measurement {
 
     fn distance_with_calibration(&self, calibration: Option<&Calibration>) -> (f32, String) {
         match calibration {
-            Some(cal) => (self.distance_px / cal.pixels_per_unit, cal.unit_name.clone()),
+            Some(cal) => (
+                self.distance_px / cal.pixels_per_unit,
+                cal.unit_name.clone(),
+            ),
             None => (self.distance_px, "px".to_string()),
         }
     }
@@ -117,7 +120,12 @@ impl RectangleMeasurement {
                 let area = self.area_px / (cal.pixels_per_unit * cal.pixels_per_unit);
                 (width, height, area, cal.unit_name.clone())
             }
-            None => (self.width_px, self.height_px, self.area_px, "px".to_string()),
+            None => (
+                self.width_px,
+                self.height_px,
+                self.area_px,
+                "px".to_string(),
+            ),
         }
     }
 }
@@ -273,7 +281,7 @@ impl Default for SampoApp {
             calibration_unit: "mm".to_string(),
             zoom: 1.0,
             is_calibrating: false,
-            text_color: egui::Color32::WHITE,
+            text_color: egui::Color32::BLACK,
             scroll_offset: egui::Vec2::ZERO,
             needs_scroll_reset: false,
             show_preview: true,
@@ -368,10 +376,8 @@ impl SampoApp {
         rgba_data: Vec<u8>,
         source_name: &str,
     ) {
-        let color_image = egui::ColorImage::from_rgba_unmultiplied(
-            [width as usize, height as usize],
-            &rgba_data,
-        );
+        let color_image =
+            egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &rgba_data);
 
         let texture = ctx.load_texture(source_name, color_image, egui::TextureOptions::LINEAR);
 
@@ -674,15 +680,15 @@ impl SampoApp {
                                 Some(cal) => {
                                     let w = width_px / cal.pixels_per_unit;
                                     let h = height_px / cal.pixels_per_unit;
-                                    let a =
-                                        area_px / (cal.pixels_per_unit * cal.pixels_per_unit);
+                                    let a = area_px / (cal.pixels_per_unit * cal.pixels_per_unit);
                                     (w, h, a, cal.unit_name.clone())
                                 }
                                 None => (width_px, height_px, area_px, "px".to_string()),
                             };
 
                             // 幅ラベル
-                            let width_pos = egui::pos2((top_left.x + top_right.x) / 2.0, min_y - 15.0);
+                            let width_pos =
+                                egui::pos2((top_left.x + top_right.x) / 2.0, min_y - 15.0);
                             painter.text(
                                 width_pos,
                                 egui::Align2::CENTER_BOTTOM,
@@ -747,10 +753,8 @@ impl SampoApp {
                             self.image_to_screen(effective_mouse_pos, image_rect);
 
                         // 線分のプレビュー
-                        painter.line_segment(
-                            [start_screen, effective_mouse_screen],
-                            preview_stroke,
-                        );
+                        painter
+                            .line_segment([start_screen, effective_mouse_screen], preview_stroke);
                         painter.circle_filled(
                             effective_mouse_screen,
                             point_radius * 0.7,
@@ -759,8 +763,7 @@ impl SampoApp {
 
                         // 距離のプレビュー表示
                         let distance_px = start.distance(effective_mouse_pos);
-                        let midpoint =
-                            start_screen + (effective_mouse_screen - start_screen) * 0.5;
+                        let midpoint = start_screen + (effective_mouse_screen - start_screen) * 0.5;
                         painter.text(
                             midpoint + egui::vec2(0.0, -15.0),
                             egui::Align2::CENTER_BOTTOM,
@@ -1268,9 +1271,7 @@ impl eframe::App for SampoApp {
         self.is_ctrl_pressed = ctx.input(|i| i.modifiers.ctrl);
 
         // キーボードショートカット: Ctrl+V / Cmd+V でクリップボードから貼り付け
-        let paste_shortcut = ctx.input(|i| {
-            i.key_pressed(egui::Key::V) && i.modifiers.command
-        });
+        let paste_shortcut = ctx.input(|i| i.key_pressed(egui::Key::V) && i.modifiers.command);
         if paste_shortcut {
             self.paste_from_clipboard(ctx);
         }
