@@ -23,6 +23,14 @@ enum CalibrationState {
     },
 }
 
+/// 測定モード
+#[derive(Default, PartialEq, Clone, Copy)]
+enum MeasurementMode {
+    #[default]
+    Line,
+    Rectangle,
+}
+
 /// 測定結果
 #[derive(Clone, Serialize, Deserialize)]
 struct Measurement {
@@ -57,6 +65,59 @@ impl Measurement {
     }
 }
 
+/// 矩形測定結果
+#[derive(Clone, Serialize, Deserialize)]
+struct RectangleMeasurement {
+    corner1: (f32, f32),
+    corner2: (f32, f32),
+    width_px: f32,
+    height_px: f32,
+    area_px: f32,
+}
+
+impl RectangleMeasurement {
+    fn new(corner1: egui::Pos2, corner2: egui::Pos2) -> Self {
+        let width_px = (corner2.x - corner1.x).abs();
+        let height_px = (corner2.y - corner1.y).abs();
+        Self {
+            corner1: (corner1.x, corner1.y),
+            corner2: (corner2.x, corner2.y),
+            width_px,
+            height_px,
+            area_px: width_px * height_px,
+        }
+    }
+
+    fn min_corner(&self) -> egui::Pos2 {
+        egui::pos2(
+            self.corner1.0.min(self.corner2.0),
+            self.corner1.1.min(self.corner2.1),
+        )
+    }
+
+    fn max_corner(&self) -> egui::Pos2 {
+        egui::pos2(
+            self.corner1.0.max(self.corner2.0),
+            self.corner1.1.max(self.corner2.1),
+        )
+    }
+
+    fn dimensions_with_calibration(
+        &self,
+        calibration: Option<&Calibration>,
+    ) -> (f32, f32, f32, String) {
+        match calibration {
+            Some(cal) => {
+                let width = self.width_px / cal.pixels_per_unit;
+                let height = self.height_px / cal.pixels_per_unit;
+                let area = self.area_px / (cal.pixels_per_unit * cal.pixels_per_unit);
+                (width, height, area, cal.unit_name.clone())
+            }
+            None => (self.width_px, self.height_px, self.area_px, "px".to_string()),
+        }
+    }
+}
+
 /// キャリブレーション設定
 #[derive(Clone, Serialize, Deserialize)]
 struct Calibration {
@@ -69,6 +130,7 @@ struct Calibration {
 struct ExportData {
     calibration: Option<Calibration>,
     measurements: Vec<ExportMeasurement>,
+    rectangle_measurements: Vec<ExportRectangleMeasurement>,
 }
 
 #[derive(Serialize)]
@@ -83,13 +145,31 @@ struct ExportMeasurement {
     unit: String,
 }
 
+#[derive(Serialize)]
+struct ExportRectangleMeasurement {
+    id: usize,
+    corner1_x: f32,
+    corner1_y: f32,
+    corner2_x: f32,
+    corner2_y: f32,
+    width_px: f32,
+    height_px: f32,
+    area_px: f32,
+    width_calibrated: Option<f32>,
+    height_calibrated: Option<f32>,
+    area_calibrated: Option<f32>,
+    unit: String,
+}
+
 /// アプリケーション状態
 struct SampoApp {
     image_texture: Option<egui::TextureHandle>,
     image_dimensions: Option<(u32, u32)>,
     image_path: Option<String>,
     measurement_state: MeasurementState,
+    measurement_mode: MeasurementMode,
     measurements: Vec<Measurement>,
+    rectangle_measurements: Vec<RectangleMeasurement>,
     calibration: Option<Calibration>,
     calibration_state: CalibrationState,
     calibration_input: String,
@@ -108,7 +188,9 @@ impl Default for SampoApp {
             image_dimensions: None,
             image_path: None,
             measurement_state: MeasurementState::default(),
+            measurement_mode: MeasurementMode::default(),
             measurements: Vec::new(),
+            rectangle_measurements: Vec::new(),
             calibration: None,
             calibration_state: CalibrationState::default(),
             calibration_input: String::new(),
@@ -184,6 +266,7 @@ impl SampoApp {
                 self.image_dimensions = Some(dimensions);
                 self.image_path = Some(path.to_string_lossy().into_owned());
                 self.measurements.clear();
+                self.rectangle_measurements.clear();
                 self.measurement_state = MeasurementState::Idle;
                 self.calibration = None;
                 self.calibration_state = CalibrationState::Idle;
@@ -240,8 +323,16 @@ impl SampoApp {
                     self.measurement_state = MeasurementState::FirstPointSelected(image_pos);
                 }
                 MeasurementState::FirstPointSelected(start) => {
-                    let measurement = Measurement::new(*start, image_pos);
-                    self.measurements.push(measurement);
+                    match self.measurement_mode {
+                        MeasurementMode::Line => {
+                            let measurement = Measurement::new(*start, image_pos);
+                            self.measurements.push(measurement);
+                        }
+                        MeasurementMode::Rectangle => {
+                            let rect_measurement = RectangleMeasurement::new(*start, image_pos);
+                            self.rectangle_measurements.push(rect_measurement);
+                        }
+                    }
                     self.measurement_state = MeasurementState::Idle;
                 }
             }
@@ -268,6 +359,73 @@ impl SampoApp {
                 midpoint + egui::vec2(0.0, -15.0),
                 egui::Align2::CENTER_BOTTOM,
                 format!("{:.1} {}", distance, unit),
+                egui::FontId::default(),
+                self.text_color,
+            );
+        }
+
+        // 矩形測定を描画
+        let rect_color = egui::Color32::from_rgb(100, 150, 255);
+        let rect_stroke = egui::Stroke::new(2.0, rect_color);
+
+        for rect_m in &self.rectangle_measurements {
+            let min_screen = self.image_to_screen(rect_m.min_corner(), image_rect);
+            let max_screen = self.image_to_screen(rect_m.max_corner(), image_rect);
+
+            // 4辺を描画
+            let top_left = min_screen;
+            let top_right = egui::pos2(max_screen.x, min_screen.y);
+            let bottom_left = egui::pos2(min_screen.x, max_screen.y);
+            let bottom_right = max_screen;
+
+            painter.line_segment([top_left, top_right], rect_stroke);
+            painter.line_segment([top_right, bottom_right], rect_stroke);
+            painter.line_segment([bottom_right, bottom_left], rect_stroke);
+            painter.line_segment([bottom_left, top_left], rect_stroke);
+
+            // 4つの角に点を描画
+            painter.circle_filled(top_left, point_radius, point_color);
+            painter.circle_filled(top_right, point_radius, point_color);
+            painter.circle_filled(bottom_left, point_radius, point_color);
+            painter.circle_filled(bottom_right, point_radius, point_color);
+
+            let (width, height, area, unit) =
+                rect_m.dimensions_with_calibration(self.calibration.as_ref());
+
+            // 幅ラベル（上辺の中央）
+            let width_pos = egui::pos2((top_left.x + top_right.x) / 2.0, top_left.y - 15.0);
+            painter.text(
+                width_pos,
+                egui::Align2::CENTER_BOTTOM,
+                format!("{:.1} {}", width, unit),
+                egui::FontId::default(),
+                self.text_color,
+            );
+
+            // 高さラベル（左辺の中央）
+            let height_pos = egui::pos2(top_left.x - 10.0, (top_left.y + bottom_left.y) / 2.0);
+            painter.text(
+                height_pos,
+                egui::Align2::RIGHT_CENTER,
+                format!("{:.1} {}", height, unit),
+                egui::FontId::default(),
+                self.text_color,
+            );
+
+            // 面積ラベル（中央）
+            let area_unit = if unit == "px" {
+                "px²".to_string()
+            } else {
+                format!("{}²", unit)
+            };
+            let center = egui::pos2(
+                (top_left.x + bottom_right.x) / 2.0,
+                (top_left.y + bottom_right.y) / 2.0,
+            );
+            painter.text(
+                center,
+                egui::Align2::CENTER_CENTER,
+                format!("{:.1} {}", area, area_unit),
                 egui::FontId::default(),
                 self.text_color,
             );
@@ -359,26 +517,70 @@ impl SampoApp {
     }
 
     fn export_csv(&self) -> String {
-        let mut csv = String::from("id,start_x,start_y,end_x,end_y,distance_px,distance_calibrated,unit\n");
-        for (i, m) in self.measurements.iter().enumerate() {
-            let (distance, unit) = m.distance_with_calibration(self.calibration.as_ref());
-            let calibrated = if self.calibration.is_some() {
-                format!("{:.2}", distance)
-            } else {
-                String::new()
-            };
-            csv.push_str(&format!(
-                "{},{:.2},{:.2},{:.2},{:.2},{:.2},{},{}\n",
-                i + 1,
-                m.start.0,
-                m.start.1,
-                m.end.0,
-                m.end.1,
-                m.distance_px,
-                calibrated,
-                unit
-            ));
+        let mut csv = String::new();
+
+        // 線分測定
+        if !self.measurements.is_empty() {
+            csv.push_str("# Line Measurements\n");
+            csv.push_str("id,start_x,start_y,end_x,end_y,distance_px,distance_calibrated,unit\n");
+            for (i, m) in self.measurements.iter().enumerate() {
+                let (distance, unit) = m.distance_with_calibration(self.calibration.as_ref());
+                let calibrated = if self.calibration.is_some() {
+                    format!("{:.2}", distance)
+                } else {
+                    String::new()
+                };
+                csv.push_str(&format!(
+                    "{},{:.2},{:.2},{:.2},{:.2},{:.2},{},{}\n",
+                    i + 1,
+                    m.start.0,
+                    m.start.1,
+                    m.end.0,
+                    m.end.1,
+                    m.distance_px,
+                    calibrated,
+                    unit
+                ));
+            }
         }
+
+        // 矩形測定
+        if !self.rectangle_measurements.is_empty() {
+            if !csv.is_empty() {
+                csv.push('\n');
+            }
+            csv.push_str("# Rectangle Measurements\n");
+            csv.push_str("id,corner1_x,corner1_y,corner2_x,corner2_y,width_px,height_px,area_px,width_calibrated,height_calibrated,area_calibrated,unit\n");
+            for (i, rm) in self.rectangle_measurements.iter().enumerate() {
+                let (width, height, area, unit) =
+                    rm.dimensions_with_calibration(self.calibration.as_ref());
+                let (w_cal, h_cal, a_cal) = if self.calibration.is_some() {
+                    (
+                        format!("{:.2}", width),
+                        format!("{:.2}", height),
+                        format!("{:.2}", area),
+                    )
+                } else {
+                    (String::new(), String::new(), String::new())
+                };
+                csv.push_str(&format!(
+                    "{},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{},{},{},{}\n",
+                    i + 1,
+                    rm.corner1.0,
+                    rm.corner1.1,
+                    rm.corner2.0,
+                    rm.corner2.1,
+                    rm.width_px,
+                    rm.height_px,
+                    rm.area_px,
+                    w_cal,
+                    h_cal,
+                    a_cal,
+                    unit
+                ));
+            }
+        }
+
         csv
     }
 
@@ -406,9 +608,46 @@ impl SampoApp {
             })
             .collect();
 
+        let rectangle_measurements: Vec<ExportRectangleMeasurement> = self
+            .rectangle_measurements
+            .iter()
+            .enumerate()
+            .map(|(i, rm)| {
+                let (width, height, area, unit) =
+                    rm.dimensions_with_calibration(self.calibration.as_ref());
+                ExportRectangleMeasurement {
+                    id: i + 1,
+                    corner1_x: rm.corner1.0,
+                    corner1_y: rm.corner1.1,
+                    corner2_x: rm.corner2.0,
+                    corner2_y: rm.corner2.1,
+                    width_px: rm.width_px,
+                    height_px: rm.height_px,
+                    area_px: rm.area_px,
+                    width_calibrated: if self.calibration.is_some() {
+                        Some(width)
+                    } else {
+                        None
+                    },
+                    height_calibrated: if self.calibration.is_some() {
+                        Some(height)
+                    } else {
+                        None
+                    },
+                    area_calibrated: if self.calibration.is_some() {
+                        Some(area)
+                    } else {
+                        None
+                    },
+                    unit,
+                }
+            })
+            .collect();
+
         let export_data = ExportData {
             calibration: self.calibration.clone(),
             measurements,
+            rectangle_measurements,
         };
 
         serde_json::to_string_pretty(&export_data).unwrap_or_default()
@@ -552,15 +791,34 @@ impl SampoApp {
                 // 測定操作
                 ui.heading("測定");
 
+                // モード切替
+                ui.horizontal(|ui| {
+                    ui.label("モード:");
+                    ui.selectable_value(&mut self.measurement_mode, MeasurementMode::Line, "線分");
+                    ui.selectable_value(
+                        &mut self.measurement_mode,
+                        MeasurementMode::Rectangle,
+                        "矩形",
+                    );
+                });
+
                 match &self.measurement_state {
                     MeasurementState::Idle => {
                         if !self.is_calibrating {
-                            ui.label("画像をクリックして測定開始");
+                            let mode_text = match self.measurement_mode {
+                                MeasurementMode::Line => "線分",
+                                MeasurementMode::Rectangle => "矩形",
+                            };
+                            ui.label(format!("画像をクリックして{}測定開始", mode_text));
                         }
                     }
                     MeasurementState::FirstPointSelected(p) => {
                         ui.label(format!("始点: ({:.0}, {:.0})", p.x, p.y));
-                        ui.label("終点をクリック");
+                        let end_text = match self.measurement_mode {
+                            MeasurementMode::Line => "終点をクリック",
+                            MeasurementMode::Rectangle => "対角をクリック",
+                        };
+                        ui.label(end_text);
                         if ui.button("キャンセル").clicked() {
                             self.measurement_state = MeasurementState::Idle;
                         }
@@ -575,26 +833,57 @@ impl SampoApp {
                 egui::ScrollArea::vertical()
                     .max_height(200.0)
                     .show(ui, |ui| {
-                        let mut to_remove = None;
+                        // 線分測定結果
+                        let mut line_to_remove = None;
                         for (i, m) in self.measurements.iter().enumerate() {
                             let (distance, unit) =
                                 m.distance_with_calibration(self.calibration.as_ref());
                             ui.horizontal(|ui| {
-                                ui.label(format!("#{}: {:.1} {}", i + 1, distance, unit));
+                                ui.label(format!("線#{}: {:.1} {}", i + 1, distance, unit));
                                 if ui.small_button("x").clicked() {
-                                    to_remove = Some(i);
+                                    line_to_remove = Some(i);
                                 }
                             });
                         }
-                        if let Some(i) = to_remove {
+                        if let Some(i) = line_to_remove {
                             self.measurements.remove(i);
+                        }
+
+                        // 矩形測定結果
+                        let mut rect_to_remove = None;
+                        for (i, rm) in self.rectangle_measurements.iter().enumerate() {
+                            let (width, height, area, unit) =
+                                rm.dimensions_with_calibration(self.calibration.as_ref());
+                            let area_unit = if unit == "px" {
+                                "px²".to_string()
+                            } else {
+                                format!("{}²", unit)
+                            };
+                            ui.horizontal(|ui| {
+                                ui.label(format!(
+                                    "矩#{}: {:.1}x{:.1} {}, {:.1} {}",
+                                    i + 1,
+                                    width,
+                                    height,
+                                    unit,
+                                    area,
+                                    area_unit
+                                ));
+                                if ui.small_button("x").clicked() {
+                                    rect_to_remove = Some(i);
+                                }
+                            });
+                        }
+                        if let Some(i) = rect_to_remove {
+                            self.rectangle_measurements.remove(i);
                         }
                     });
 
-                if !self.measurements.is_empty() {
+                if !self.measurements.is_empty() || !self.rectangle_measurements.is_empty() {
                     ui.horizontal(|ui| {
                         if ui.button("すべてクリア").clicked() {
                             self.measurements.clear();
+                            self.rectangle_measurements.clear();
                         }
                     });
                 }
