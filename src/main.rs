@@ -366,6 +366,12 @@ struct SampoApp {
     /// 起動時に追加する寸法（テスト用）
     #[cfg(test)]
     pending_measurements: Vec<(egui::Pos2, egui::Pos2)>,
+    /// Undo回数（テスト用）
+    #[cfg(test)]
+    pending_undo_count: u32,
+    /// Redo回数（テスト用）
+    #[cfg(test)]
+    pending_redo_count: u32,
 }
 
 impl Default for SampoApp {
@@ -396,6 +402,10 @@ impl Default for SampoApp {
             pending_image_path: None,
             #[cfg(test)]
             pending_measurements: Vec::new(),
+            #[cfg(test)]
+            pending_undo_count: 0,
+            #[cfg(test)]
+            pending_redo_count: 0,
         }
     }
 }
@@ -1466,6 +1476,24 @@ impl eframe::App for SampoApp {
             self.rebuild_from_history();
         }
 
+        // テスト用：Undo操作を実行
+        #[cfg(test)]
+        while self.pending_undo_count > 0 {
+            if self.history.undo() {
+                self.rebuild_from_history();
+            }
+            self.pending_undo_count -= 1;
+        }
+
+        // テスト用：Redo操作を実行
+        #[cfg(test)]
+        while self.pending_redo_count > 0 {
+            if self.history.redo() {
+                self.rebuild_from_history();
+            }
+            self.pending_redo_count -= 1;
+        }
+
         // Ctrlキーの状態を取得
         self.is_ctrl_pressed = ctx.input(|i| i.modifiers.ctrl);
 
@@ -1572,20 +1600,24 @@ mod tests {
     use egui_kittest::Harness;
     use std::path::PathBuf;
 
+    /// テスト用ハーネスを作成するヘルパー関数
+    fn create_test_harness(
+        measurements: Vec<(egui::Pos2, egui::Pos2)>,
+    ) -> Harness<'static, SampoApp> {
+        let image_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/lenna.png");
+        Harness::builder()
+            .with_size(egui::vec2(1024.0, 768.0))
+            .build_eframe(|cc| SampoApp::new_for_test(cc, Some(image_path), measurements))
+    }
+
     #[test]
     fn test_load_image_and_add_dimension() {
-        // 画像パスを準備
-        let image_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/lenna.png");
-
         // 追加する寸法を準備（画像座標）
         let start = egui::pos2(100.0, 100.0);
         let end = egui::pos2(200.0, 150.0);
         let measurements = vec![(start, end)];
 
-        // eframe::Appとしてハーネスを作成（画像と寸法を初期化時に指定）
-        let mut harness = Harness::builder()
-            .with_size(egui::vec2(1024.0, 768.0))
-            .build_eframe(|cc| SampoApp::new_for_test(cc, Some(image_path), measurements));
+        let mut harness = create_test_harness(measurements);
 
         // 初回のupdateで画像と寸法が読み込まれる
         harness.run();
@@ -1641,5 +1673,178 @@ mod tests {
 
         // スナップショットテスト
         harness.snapshot("load_image_and_add_dimension");
+    }
+
+    /// シナリオ: 寸法を1つ追加 → Undo → 寸法が消える
+    #[test]
+    fn test_undo_single_measurement() {
+        // 1つの寸法を追加
+        let measurements = vec![(egui::pos2(100.0, 100.0), egui::pos2(200.0, 150.0))];
+        let mut harness = create_test_harness(measurements);
+
+        // 初回のupdateで寸法が追加される
+        harness.run();
+        assert_eq!(
+            harness.state().measurements.len(),
+            1,
+            "初期状態: 寸法が1つあるべき"
+        );
+
+        // Undoを実行するためにpending_undo_countを設定
+        harness.state_mut().pending_undo_count = 1;
+        harness.run();
+
+        // 検証: 寸法が消えている
+        assert_eq!(
+            harness.state().measurements.len(),
+            0,
+            "Undo後: 寸法が0になるべき"
+        );
+
+        // スナップショット: Undo後の状態
+        harness.snapshot("undo_single_measurement");
+    }
+
+    /// シナリオ: 寸法を追加 → Undo → Redo → 寸法が復活
+    #[test]
+    fn test_redo_after_undo() {
+        // 1つの寸法を追加
+        let measurements = vec![(egui::pos2(100.0, 100.0), egui::pos2(200.0, 150.0))];
+        let mut harness = create_test_harness(measurements);
+
+        // 初回のupdate
+        harness.run();
+        assert_eq!(harness.state().measurements.len(), 1, "初期状態: 1つ");
+
+        // Undo
+        harness.state_mut().pending_undo_count = 1;
+        harness.run();
+        assert_eq!(harness.state().measurements.len(), 0, "Undo後: 0");
+
+        // Redo
+        harness.state_mut().pending_redo_count = 1;
+        harness.run();
+        assert_eq!(harness.state().measurements.len(), 1, "Redo後: 1つ復活");
+
+        // 復活した寸法の検証
+        let measurement = &harness.state().measurements[0];
+        assert!(
+            (measurement.start.0 - 100.0).abs() < 0.1,
+            "Redo後の始点Xが100であるべき"
+        );
+        assert!(
+            (measurement.end.0 - 200.0).abs() < 0.1,
+            "Redo後の終点Xが200であるべき"
+        );
+
+        // スナップショット: Redo後の状態
+        harness.snapshot("redo_after_undo");
+    }
+
+    /// シナリオ: 複数の寸法を追加 → 複数回Undo → 複数回Redo
+    #[test]
+    fn test_multiple_undo_redo() {
+        // 3つの寸法を追加
+        let measurements = vec![
+            (egui::pos2(100.0, 100.0), egui::pos2(150.0, 100.0)), // 水平線 50px
+            (egui::pos2(200.0, 100.0), egui::pos2(200.0, 180.0)), // 垂直線 80px
+            (egui::pos2(300.0, 100.0), egui::pos2(400.0, 200.0)), // 斜め線
+        ];
+        let mut harness = create_test_harness(measurements);
+
+        // 初回のupdate
+        harness.run();
+        assert_eq!(harness.state().measurements.len(), 3, "初期状態: 3つ");
+
+        // 1回Undo → 2つになる
+        harness.state_mut().pending_undo_count = 1;
+        harness.run();
+        assert_eq!(harness.state().measurements.len(), 2, "Undo 1回後: 2つ");
+
+        // スナップショット: 2つの寸法
+        harness.snapshot("multiple_undo_redo_step1_after_undo");
+
+        // もう1回Undo → 1つになる
+        harness.state_mut().pending_undo_count = 1;
+        harness.run();
+        assert_eq!(harness.state().measurements.len(), 1, "Undo 2回後: 1つ");
+
+        // 残った寸法は最初のもの（水平線 50px）
+        let remaining = &harness.state().measurements[0];
+        let expected_dist = 50.0;
+        assert!(
+            (remaining.distance_px - expected_dist).abs() < 0.1,
+            "残った寸法は50pxであるべき（実際: {:.1}）",
+            remaining.distance_px
+        );
+
+        // スナップショット: 1つの寸法
+        harness.snapshot("multiple_undo_redo_step2_after_undo");
+
+        // Redo 1回 → 2つに戻る
+        harness.state_mut().pending_redo_count = 1;
+        harness.run();
+        assert_eq!(harness.state().measurements.len(), 2, "Redo 1回後: 2つ");
+
+        // 2番目の寸法が復活（垂直線 80px）
+        let second = &harness.state().measurements[1];
+        let expected_dist = 80.0;
+        assert!(
+            (second.distance_px - expected_dist).abs() < 0.1,
+            "復活した寸法は80pxであるべき（実際: {:.1}）",
+            second.distance_px
+        );
+
+        // Redo もう1回 → 3つに戻る
+        harness.state_mut().pending_redo_count = 1;
+        harness.run();
+        assert_eq!(harness.state().measurements.len(), 3, "Redo 2回後: 3つ");
+
+        // スナップショット: 全て復活
+        harness.snapshot("multiple_undo_redo_step3_all_restored");
+    }
+
+    /// シナリオ: Undo後に新しい操作 → Redoできなくなる
+    #[test]
+    fn test_undo_then_new_action_clears_redo() {
+        // 2つの寸法を追加
+        let measurements = vec![
+            (egui::pos2(100.0, 100.0), egui::pos2(200.0, 100.0)), // 100px
+            (egui::pos2(100.0, 200.0), egui::pos2(200.0, 200.0)), // 100px
+        ];
+        let mut harness = create_test_harness(measurements);
+
+        // 初回のupdate
+        harness.run();
+        assert_eq!(harness.state().measurements.len(), 2, "初期状態: 2つ");
+
+        // Undo → 1つになる
+        harness.state_mut().pending_undo_count = 1;
+        harness.run();
+        assert_eq!(harness.state().measurements.len(), 1, "Undo後: 1つ");
+
+        // Redoできるか確認
+        assert!(harness.state().history.can_redo(), "Redo可能であるべき");
+
+        // 新しい寸法を追加（これによりRedo履歴がクリアされる）
+        harness.state_mut().pending_measurements =
+            vec![(egui::pos2(300.0, 300.0), egui::pos2(400.0, 300.0))];
+        harness.run();
+
+        // 2つになる（Undo前の1つ + 新しい1つ）
+        assert_eq!(
+            harness.state().measurements.len(),
+            2,
+            "新しい操作後: 2つ"
+        );
+
+        // Redoできなくなっている
+        assert!(
+            !harness.state().history.can_redo(),
+            "新しい操作後はRedoできないべき"
+        );
+
+        // スナップショット
+        harness.snapshot("undo_then_new_action_clears_redo");
     }
 }
