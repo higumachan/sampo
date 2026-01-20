@@ -294,7 +294,7 @@ impl SampoApp {
         }
     }
 
-    fn show_image_canvas(&mut self, ui: &mut egui::Ui) {
+    fn show_image_canvas(&mut self, ui: &mut egui::Ui, viewport_size: egui::Vec2) {
         let Some(texture) = &self.image_texture else {
             ui.centered_and_justified(|ui| {
                 ui.label("画像が読み込まれていません。「画像を開く」をクリックしてください。");
@@ -303,24 +303,56 @@ impl SampoApp {
         };
 
         let texture_size = texture.size_vec2() * self.zoom;
+        let texture_id = texture.id();
 
-        let (response, painter) =
-            ui.allocate_painter(texture_size, egui::Sense::click_and_drag());
+        // 画像の外側にもスクロールできるようにパディングを追加
+        let padding = viewport_size;
 
-        painter.image(
-            texture.id(),
-            response.rect,
-            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-            egui::Color32::WHITE,
-        );
+        // 上部パディング
+        ui.allocate_space(egui::vec2(texture_size.x + padding.x * 2.0, padding.y));
 
-        if response.clicked() {
-            if let Some(pointer_pos) = response.interact_pointer_pos() {
-                self.handle_canvas_click(pointer_pos, response.rect);
+        // 画像描画用の情報を保持
+        let mut image_rect = None;
+        let mut clicked_pos = None;
+
+        ui.horizontal(|ui| {
+            // 左パディング
+            ui.allocate_space(egui::vec2(padding.x, texture_size.y));
+
+            // 画像を描画
+            let (response, painter) =
+                ui.allocate_painter(texture_size, egui::Sense::click_and_drag());
+
+            painter.image(
+                texture_id,
+                response.rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+
+            image_rect = Some(response.rect);
+
+            if response.clicked() {
+                clicked_pos = response.interact_pointer_pos();
             }
-        }
 
-        self.draw_measurements(&painter, response.rect);
+            // 右パディング
+            ui.allocate_space(egui::vec2(padding.x, texture_size.y));
+        });
+
+        // 下部パディング
+        ui.allocate_space(egui::vec2(texture_size.x + padding.x * 2.0, padding.y));
+
+        // クリック処理と測定線描画
+        if let Some(rect) = image_rect {
+            if let Some(pointer_pos) = clicked_pos {
+                self.handle_canvas_click(pointer_pos, rect);
+            }
+
+            // 測定線を描画（別のPainterを使用）
+            let painter = ui.painter_at(rect);
+            self.draw_measurements(&painter, rect);
+        }
     }
 
     fn export_csv(&self) -> String {
@@ -593,6 +625,11 @@ impl eframe::App for SampoApp {
             let zoom_delta = ui.input(|i| i.zoom_delta());
             let pointer_pos = ui.input(|i| i.pointer.hover_pos());
 
+            let viewport_size = scroll_area_rect.size();
+
+            // パディングはviewport_sizeと同じ
+            let padding = viewport_size;
+
             if zoom_delta != 1.0 && self.image_texture.is_some() {
                 if let Some(pointer) = pointer_pos {
                     // ポインタがスクロールエリア内にあるか確認
@@ -603,18 +640,22 @@ impl eframe::App for SampoApp {
                         // ポインタが指しているコンテンツ上の位置
                         let content_pos = self.scroll_offset + pointer_rel;
 
+                        // コンテンツ座標から画像座標を計算（パディングを引く）
+                        let image_pos = content_pos - padding;
+
                         // 新しいズームを計算
                         let old_zoom = self.zoom;
                         let new_zoom = (old_zoom * zoom_delta).clamp(0.1, 5.0);
                         let zoom_ratio = new_zoom / old_zoom;
 
-                        // ズーム後、同じコンテンツ位置がポインタの下に来るようにスクロール位置を調整
-                        // content_pos * zoom_ratio = new_scroll_offset + pointer_rel
-                        // new_scroll_offset = content_pos * zoom_ratio - pointer_rel
-                        self.scroll_offset = content_pos * zoom_ratio - pointer_rel;
+                        // 画像座標をズーム比率で拡大
+                        let new_image_pos = image_pos * zoom_ratio;
 
-                        // スクロール位置が負にならないようにクランプ
-                        self.scroll_offset = self.scroll_offset.max(egui::Vec2::ZERO);
+                        // 新しいコンテンツ座標 = パディング + 新しい画像座標
+                        let new_content_pos = padding + new_image_pos;
+
+                        // 新しいスクロールオフセット = 新しいコンテンツ座標 - ポインタ相対位置
+                        self.scroll_offset = new_content_pos - pointer_rel;
 
                         self.zoom = new_zoom;
                     }
@@ -625,7 +666,7 @@ impl eframe::App for SampoApp {
                 .auto_shrink([false, false])
                 .scroll_offset(self.scroll_offset)
                 .show(ui, |ui| {
-                    self.show_image_canvas(ui);
+                    self.show_image_canvas(ui, viewport_size);
                 });
 
             // ScrollAreaの実際のスクロール位置を同期
