@@ -179,6 +179,8 @@ struct SampoApp {
     text_color: egui::Color32,
     scroll_offset: egui::Vec2,
     needs_scroll_reset: bool,
+    show_preview: bool,
+    current_mouse_image_pos: Option<egui::Pos2>,
 }
 
 impl Default for SampoApp {
@@ -200,6 +202,8 @@ impl Default for SampoApp {
             text_color: egui::Color32::WHITE,
             scroll_offset: egui::Vec2::ZERO,
             needs_scroll_reset: false,
+            show_preview: true,
+            current_mouse_image_pos: None,
         }
     }
 }
@@ -435,6 +439,117 @@ impl SampoApp {
         if let MeasurementState::FirstPointSelected(start) = &self.measurement_state {
             let start_screen = self.image_to_screen(*start, image_rect);
             painter.circle_filled(start_screen, point_radius, egui::Color32::YELLOW);
+
+            // プレビュー描画
+            if self.show_preview {
+                if let Some(mouse_pos) = self.current_mouse_image_pos {
+                    let mouse_screen = self.image_to_screen(mouse_pos, image_rect);
+                    let preview_color = egui::Color32::from_rgba_unmultiplied(255, 255, 0, 150);
+                    let preview_stroke = egui::Stroke::new(1.5, preview_color);
+
+                    match self.measurement_mode {
+                        MeasurementMode::Line => {
+                            // 線分のプレビュー
+                            painter.line_segment([start_screen, mouse_screen], preview_stroke);
+                            painter.circle_filled(
+                                mouse_screen,
+                                point_radius * 0.7,
+                                preview_color,
+                            );
+
+                            // 距離のプレビュー表示
+                            let distance_px = start.distance(mouse_pos);
+                            let (distance, unit) = match &self.calibration {
+                                Some(cal) => {
+                                    (distance_px / cal.pixels_per_unit, cal.unit_name.clone())
+                                }
+                                None => (distance_px, "px".to_string()),
+                            };
+                            let midpoint = start_screen + (mouse_screen - start_screen) * 0.5;
+                            painter.text(
+                                midpoint + egui::vec2(0.0, -15.0),
+                                egui::Align2::CENTER_BOTTOM,
+                                format!("{:.1} {}", distance, unit),
+                                egui::FontId::default(),
+                                self.text_color,
+                            );
+                        }
+                        MeasurementMode::Rectangle => {
+                            // 矩形のプレビュー
+                            let min_x = start_screen.x.min(mouse_screen.x);
+                            let max_x = start_screen.x.max(mouse_screen.x);
+                            let min_y = start_screen.y.min(mouse_screen.y);
+                            let max_y = start_screen.y.max(mouse_screen.y);
+
+                            let top_left = egui::pos2(min_x, min_y);
+                            let top_right = egui::pos2(max_x, min_y);
+                            let bottom_left = egui::pos2(min_x, max_y);
+                            let bottom_right = egui::pos2(max_x, max_y);
+
+                            painter.line_segment([top_left, top_right], preview_stroke);
+                            painter.line_segment([top_right, bottom_right], preview_stroke);
+                            painter.line_segment([bottom_right, bottom_left], preview_stroke);
+                            painter.line_segment([bottom_left, top_left], preview_stroke);
+
+                            painter.circle_filled(top_left, point_radius * 0.7, preview_color);
+                            painter.circle_filled(top_right, point_radius * 0.7, preview_color);
+                            painter.circle_filled(bottom_left, point_radius * 0.7, preview_color);
+                            painter.circle_filled(bottom_right, point_radius * 0.7, preview_color);
+
+                            // 寸法のプレビュー表示
+                            let width_px = (mouse_pos.x - start.x).abs();
+                            let height_px = (mouse_pos.y - start.y).abs();
+                            let area_px = width_px * height_px;
+
+                            let (width, height, area, unit) = match &self.calibration {
+                                Some(cal) => {
+                                    let w = width_px / cal.pixels_per_unit;
+                                    let h = height_px / cal.pixels_per_unit;
+                                    let a =
+                                        area_px / (cal.pixels_per_unit * cal.pixels_per_unit);
+                                    (w, h, a, cal.unit_name.clone())
+                                }
+                                None => (width_px, height_px, area_px, "px".to_string()),
+                            };
+
+                            // 幅ラベル
+                            let width_pos = egui::pos2((top_left.x + top_right.x) / 2.0, min_y - 15.0);
+                            painter.text(
+                                width_pos,
+                                egui::Align2::CENTER_BOTTOM,
+                                format!("{:.1} {}", width, unit),
+                                egui::FontId::default(),
+                                self.text_color,
+                            );
+
+                            // 高さラベル
+                            let height_pos = egui::pos2(min_x - 10.0, (min_y + max_y) / 2.0);
+                            painter.text(
+                                height_pos,
+                                egui::Align2::RIGHT_CENTER,
+                                format!("{:.1} {}", height, unit),
+                                egui::FontId::default(),
+                                self.text_color,
+                            );
+
+                            // 面積ラベル
+                            let area_unit = if unit == "px" {
+                                "px²".to_string()
+                            } else {
+                                format!("{}²", unit)
+                            };
+                            let center = egui::pos2((min_x + max_x) / 2.0, (min_y + max_y) / 2.0);
+                            painter.text(
+                                center,
+                                egui::Align2::CENTER_CENTER,
+                                format!("{:.1} {}", area, area_unit),
+                                egui::FontId::default(),
+                                self.text_color,
+                            );
+                        }
+                    }
+                }
+            }
         }
 
         // キャリブレーション中の線を描画
@@ -475,6 +590,7 @@ impl SampoApp {
         // 画像描画用の情報を保持
         let mut image_rect = None;
         let mut clicked_pos = None;
+        let mut hover_pos = None;
 
         ui.horizontal(|ui| {
             // 左パディング
@@ -497,6 +613,9 @@ impl SampoApp {
                 clicked_pos = response.interact_pointer_pos();
             }
 
+            // ホバー位置を取得
+            hover_pos = response.hover_pos();
+
             // 右パディング
             ui.allocate_space(egui::vec2(padding.x, texture_size.y));
         });
@@ -506,6 +625,9 @@ impl SampoApp {
 
         // クリック処理と測定線描画
         if let Some(rect) = image_rect {
+            // マウス位置を画像座標に変換して保存
+            self.current_mouse_image_pos = hover_pos.map(|pos| self.screen_to_image(pos, rect));
+
             if let Some(pointer_pos) = clicked_pos {
                 self.handle_canvas_click(pointer_pos, rect);
             }
@@ -513,6 +635,8 @@ impl SampoApp {
             // 測定線を描画（別のPainterを使用）
             let painter = ui.painter_at(rect);
             self.draw_measurements(&painter, rect);
+        } else {
+            self.current_mouse_image_pos = None;
         }
     }
 
@@ -720,6 +844,7 @@ impl SampoApp {
                     ui.label("寸法文字色:");
                     ui.color_edit_button_srgba(&mut self.text_color);
                 });
+                ui.checkbox(&mut self.show_preview, "測定プレビューを表示");
 
                 ui.separator();
 
