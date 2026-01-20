@@ -137,6 +137,102 @@ struct Calibration {
     unit_name: String,
 }
 
+/// Undo/Redo 用の操作ログ
+#[derive(Clone)]
+enum Action {
+    AddLine(Measurement),
+    AddRect(RectangleMeasurement),
+    RemoveLine(usize),
+    RemoveRect(usize),
+    SetCalibration(Option<Calibration>),
+}
+
+/// ログベースの履歴管理
+#[derive(Default)]
+struct History {
+    actions: Vec<Action>,
+    cursor: usize,
+}
+
+impl History {
+    fn push_action(&mut self, action: Action) {
+        if self.cursor < self.actions.len() {
+            self.actions.truncate(self.cursor);
+        }
+        self.actions.push(action);
+        self.cursor = self.actions.len();
+    }
+
+    fn can_undo(&self) -> bool {
+        self.cursor > 0
+    }
+
+    fn can_redo(&self) -> bool {
+        self.cursor < self.actions.len()
+    }
+
+    fn undo(&mut self) -> bool {
+        if self.can_undo() {
+            self.cursor -= 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn redo(&mut self) -> bool {
+        if self.can_redo() {
+            self.cursor += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn rebuild_state(
+        &self,
+    ) -> (
+        Vec<Measurement>,
+        Vec<RectangleMeasurement>,
+        Option<Calibration>,
+    ) {
+        let mut measurements = Vec::new();
+        let mut rectangle_measurements = Vec::new();
+        let mut calibration = None;
+
+        for action in self.actions.iter().take(self.cursor) {
+            match action {
+                Action::AddLine(m) => measurements.push(m.clone()),
+                Action::AddRect(r) => rectangle_measurements.push(r.clone()),
+                Action::RemoveLine(index) => {
+                    if *index < measurements.len() {
+                        measurements.remove(*index);
+                    }
+                }
+                Action::RemoveRect(index) => {
+                    if *index < rectangle_measurements.len() {
+                        rectangle_measurements.remove(*index);
+                    }
+                }
+                Action::SetCalibration(cal) => {
+                    calibration = cal.clone();
+                }
+            }
+        }
+
+        (measurements, rectangle_measurements, calibration)
+    }
+
+    fn reset_with_calibration(&mut self, calibration: Option<Calibration>) {
+        self.actions.clear();
+        self.cursor = 0;
+        if let Some(cal) = calibration {
+            self.actions.push(Action::SetCalibration(Some(cal)));
+            self.cursor = self.actions.len();
+        }
+    }
+}
+
 /// エクスポート用のデータ構造
 #[derive(Serialize)]
 struct ExportData {
@@ -263,6 +359,7 @@ struct SampoApp {
     current_mouse_image_pos: Option<egui::Pos2>,
     is_ctrl_pressed: bool,
     length_snap_multiple: f32,
+    history: History,
 }
 
 impl Default for SampoApp {
@@ -288,6 +385,7 @@ impl Default for SampoApp {
             current_mouse_image_pos: None,
             is_ctrl_pressed: false,
             length_snap_multiple: 1.0,
+            history: History::default(),
         }
     }
 }
@@ -361,6 +459,7 @@ impl SampoApp {
                 self.is_calibrating = false;
                 self.zoom = 1.0;
                 self.needs_scroll_reset = true;
+                self.history = History::default();
             }
             Err(e) => {
                 eprintln!("Failed to load image: {}", e);
@@ -392,6 +491,7 @@ impl SampoApp {
         self.is_calibrating = false;
         self.zoom = 1.0;
         self.needs_scroll_reset = true;
+        self.history = History::default();
     }
 
     fn paste_from_clipboard(&mut self, ctx: &egui::Context) {
@@ -439,6 +539,13 @@ impl SampoApp {
         }
     }
 
+    fn rebuild_from_history(&mut self) {
+        let (measurements, rectangle_measurements, calibration) = self.history.rebuild_state();
+        self.measurements = measurements;
+        self.rectangle_measurements = rectangle_measurements;
+        self.calibration = calibration;
+    }
+
     fn handle_canvas_click(&mut self, click_pos: egui::Pos2, image_rect: egui::Rect) {
         let image_pos = self.screen_to_image(click_pos, image_rect);
 
@@ -482,13 +589,15 @@ impl SampoApp {
                             let end_pos =
                                 snap_line_length(*start, angle_snapped, self.length_snap_multiple);
                             let measurement = Measurement::new(*start, end_pos);
-                            self.measurements.push(measurement);
+                            self.history.push_action(Action::AddLine(measurement));
+                            self.rebuild_from_history();
                         }
                         MeasurementMode::Rectangle => {
                             let end_pos =
                                 snap_rect_dimensions(*start, image_pos, self.length_snap_multiple);
                             let rect_measurement = RectangleMeasurement::new(*start, end_pos);
-                            self.rectangle_measurements.push(rect_measurement);
+                            self.history.push_action(Action::AddRect(rect_measurement));
+                            self.rebuild_from_history();
                         }
                     }
                     self.measurement_state = MeasurementState::Idle;
@@ -1017,6 +1126,24 @@ impl SampoApp {
                 ui.heading("Sampo - 画像寸法測定");
                 ui.separator();
 
+                // Undo / Redo
+                ui.horizontal(|ui| {
+                    let can_undo = self.history.can_undo();
+                    let can_redo = self.history.can_redo();
+                    if ui.add_enabled(can_undo, egui::Button::new("Undo")).clicked() {
+                        if self.history.undo() {
+                            self.rebuild_from_history();
+                        }
+                    }
+                    if ui.add_enabled(can_redo, egui::Button::new("Redo")).clicked() {
+                        if self.history.redo() {
+                            self.rebuild_from_history();
+                        }
+                    }
+                });
+
+                ui.separator();
+
                 // ファイル操作
                 ui.horizontal(|ui| {
                     if ui.button("画像を開く").clicked() {
@@ -1077,7 +1204,8 @@ impl SampoApp {
                         cal.pixels_per_unit, cal.unit_name
                     ));
                     if ui.button("キャリブレーションをクリア").clicked() {
-                        self.calibration = None;
+                        self.history.push_action(Action::SetCalibration(None));
+                        self.rebuild_from_history();
                     }
                 } else {
                     ui.label("未設定");
@@ -1117,10 +1245,13 @@ impl SampoApp {
                             if ui.button("適用").clicked() {
                                 if let Ok(real_distance) = self.calibration_input.parse::<f32>() {
                                     if real_distance > 0.0 {
-                                        self.calibration = Some(Calibration {
+                                        let calibration = Calibration {
                                             pixels_per_unit: distance_px / real_distance,
                                             unit_name: self.calibration_unit.clone(),
-                                        });
+                                        };
+                                        self.history
+                                            .push_action(Action::SetCalibration(Some(calibration)));
+                                        self.rebuild_from_history();
                                         self.is_calibrating = false;
                                         self.calibration_state = CalibrationState::Idle;
                                         self.calibration_input.clear();
@@ -1206,7 +1337,8 @@ impl SampoApp {
                             });
                         }
                         if let Some(i) = line_to_remove {
-                            self.measurements.remove(i);
+                            self.history.push_action(Action::RemoveLine(i));
+                            self.rebuild_from_history();
                         }
 
                         // 矩形測定結果
@@ -1235,7 +1367,8 @@ impl SampoApp {
                             });
                         }
                         if let Some(i) = rect_to_remove {
-                            self.rectangle_measurements.remove(i);
+                            self.history.push_action(Action::RemoveRect(i));
+                            self.rebuild_from_history();
                         }
                     });
 
@@ -1244,6 +1377,8 @@ impl SampoApp {
                         if ui.button("すべてクリア").clicked() {
                             self.measurements.clear();
                             self.rectangle_measurements.clear();
+                            self.history
+                                .reset_with_calibration(self.calibration.clone());
                         }
                     });
                 }
@@ -1274,6 +1409,18 @@ impl eframe::App for SampoApp {
         let paste_shortcut = ctx.input(|i| i.key_pressed(egui::Key::V) && i.modifiers.command);
         if paste_shortcut {
             self.paste_from_clipboard(ctx);
+        }
+
+        // Undo/Redo ショートカット: Ctrl/Cmd+Z, Shift+Ctrl/Cmd+Z
+        let undo_shortcut = ctx
+            .input(|i| i.key_pressed(egui::Key::Z) && i.modifiers.command && !i.modifiers.shift);
+        let redo_shortcut = ctx
+            .input(|i| i.key_pressed(egui::Key::Z) && i.modifiers.command && i.modifiers.shift);
+        if undo_shortcut && self.history.undo() {
+            self.rebuild_from_history();
+        }
+        if redo_shortcut && self.history.redo() {
+            self.rebuild_from_history();
         }
 
         self.show_controls_panel(ctx);
