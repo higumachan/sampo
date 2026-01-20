@@ -2,6 +2,9 @@ use eframe::egui;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// スナップする角度の許容範囲（度）
+const SNAP_ANGLE_TOLERANCE_DEG: f32 = 5.0;
+
 /// 測定状態のステートマシン
 #[derive(Default)]
 enum MeasurementState {
@@ -161,6 +164,37 @@ struct ExportRectangleMeasurement {
     unit: String,
 }
 
+/// 線分の終点をスナップ角度に合わせて調整する
+/// start: 始点, end: 終点（スナップ前）
+/// 戻り値: スナップ後の終点
+fn snap_to_angle(start: egui::Pos2, end: egui::Pos2) -> egui::Pos2 {
+    let delta = end - start;
+    let distance = delta.length();
+    if distance < 0.001 {
+        return end;
+    }
+
+    // 角度を計算（ラジアン→度）
+    let angle_rad = delta.y.atan2(delta.x);
+    let angle_deg = angle_rad.to_degrees();
+
+    // 0, 90, 180, -180, -90 にスナップ
+    let snap_angles = [0.0_f32, 90.0, 180.0, -180.0, -90.0];
+
+    for &snap_angle in &snap_angles {
+        let diff = (angle_deg - snap_angle).abs();
+        if diff <= SNAP_ANGLE_TOLERANCE_DEG {
+            let snapped_rad = snap_angle.to_radians();
+            return egui::pos2(
+                start.x + distance * snapped_rad.cos(),
+                start.y + distance * snapped_rad.sin(),
+            );
+        }
+    }
+
+    end // スナップしない場合はそのまま
+}
+
 /// アプリケーション状態
 struct SampoApp {
     image_texture: Option<egui::TextureHandle>,
@@ -181,6 +215,7 @@ struct SampoApp {
     needs_scroll_reset: bool,
     show_preview: bool,
     current_mouse_image_pos: Option<egui::Pos2>,
+    is_ctrl_pressed: bool,
 }
 
 impl Default for SampoApp {
@@ -204,6 +239,7 @@ impl Default for SampoApp {
             needs_scroll_reset: false,
             show_preview: true,
             current_mouse_image_pos: None,
+            is_ctrl_pressed: false,
         }
     }
 }
@@ -329,7 +365,12 @@ impl SampoApp {
                 MeasurementState::FirstPointSelected(start) => {
                     match self.measurement_mode {
                         MeasurementMode::Line => {
-                            let measurement = Measurement::new(*start, image_pos);
+                            let end_pos = if self.is_ctrl_pressed {
+                                snap_to_angle(*start, image_pos)
+                            } else {
+                                image_pos
+                            };
+                            let measurement = Measurement::new(*start, end_pos);
                             self.measurements.push(measurement);
                         }
                         MeasurementMode::Rectangle => {
@@ -449,23 +490,36 @@ impl SampoApp {
 
                     match self.measurement_mode {
                         MeasurementMode::Line => {
+                            // スナップ適用
+                            let effective_mouse_pos = if self.is_ctrl_pressed {
+                                snap_to_angle(*start, mouse_pos)
+                            } else {
+                                mouse_pos
+                            };
+                            let effective_mouse_screen =
+                                self.image_to_screen(effective_mouse_pos, image_rect);
+
                             // 線分のプレビュー
-                            painter.line_segment([start_screen, mouse_screen], preview_stroke);
+                            painter.line_segment(
+                                [start_screen, effective_mouse_screen],
+                                preview_stroke,
+                            );
                             painter.circle_filled(
-                                mouse_screen,
+                                effective_mouse_screen,
                                 point_radius * 0.7,
                                 preview_color,
                             );
 
                             // 距離のプレビュー表示
-                            let distance_px = start.distance(mouse_pos);
+                            let distance_px = start.distance(effective_mouse_pos);
                             let (distance, unit) = match &self.calibration {
                                 Some(cal) => {
                                     (distance_px / cal.pixels_per_unit, cal.unit_name.clone())
                                 }
                                 None => (distance_px, "px".to_string()),
                             };
-                            let midpoint = start_screen + (mouse_screen - start_screen) * 0.5;
+                            let midpoint =
+                                start_screen + (effective_mouse_screen - start_screen) * 0.5;
                             painter.text(
                                 midpoint + egui::vec2(0.0, -15.0),
                                 egui::Align2::CENTER_BOTTOM,
@@ -927,6 +981,10 @@ impl SampoApp {
                     );
                 });
 
+                if self.measurement_mode == MeasurementMode::Line {
+                    ui.label("(Ctrl押下で水平/垂直スナップ)");
+                }
+
                 match &self.measurement_state {
                     MeasurementState::Idle => {
                         if !self.is_calibrating {
@@ -1032,6 +1090,9 @@ impl SampoApp {
 
 impl eframe::App for SampoApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Ctrlキーの状態を取得
+        self.is_ctrl_pressed = ctx.input(|i| i.modifiers.ctrl);
+
         self.show_controls_panel(ctx);
 
         egui::CentralPanel::default().show(ctx, |ui| {
