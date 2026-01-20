@@ -2868,6 +2868,7 @@ dependencies = [
 name = "sampo"
 version = "0.1.0"
 dependencies = [
+ "arboard",
  "eframe",
  "egui",
  "egui_extras",

@@ -1,3 +1,4 @@
+use arboard::Clipboard;
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -355,6 +356,61 @@ impl SampoApp {
             }
             Err(e) => {
                 eprintln!("Failed to load image: {}", e);
+            }
+        }
+    }
+
+    fn load_image_from_rgba(
+        &mut self,
+        ctx: &egui::Context,
+        width: u32,
+        height: u32,
+        rgba_data: Vec<u8>,
+        source_name: &str,
+    ) {
+        let color_image = egui::ColorImage::from_rgba_unmultiplied(
+            [width as usize, height as usize],
+            &rgba_data,
+        );
+
+        let texture = ctx.load_texture(source_name, color_image, egui::TextureOptions::LINEAR);
+
+        self.image_texture = Some(texture);
+        self.image_dimensions = Some((width, height));
+        self.image_path = Some(source_name.to_string());
+        self.measurements.clear();
+        self.rectangle_measurements.clear();
+        self.measurement_state = MeasurementState::Idle;
+        self.calibration = None;
+        self.calibration_state = CalibrationState::Idle;
+        self.is_calibrating = false;
+        self.zoom = 1.0;
+        self.needs_scroll_reset = true;
+    }
+
+    fn paste_from_clipboard(&mut self, ctx: &egui::Context) {
+        match Clipboard::new() {
+            Ok(mut clipboard) => match clipboard.get_image() {
+                Ok(img_data) => {
+                    // arboard::ImageData の RGBA データを取得
+                    let width = img_data.width as u32;
+                    let height = img_data.height as u32;
+                    let rgba_data = img_data.bytes.into_owned();
+
+                    self.load_image_from_rgba(
+                        ctx,
+                        width,
+                        height,
+                        rgba_data,
+                        "[クリップボードから貼り付け]",
+                    );
+                }
+                Err(e) => {
+                    eprintln!("クリップボードに画像がありません: {}", e);
+                }
+            },
+            Err(e) => {
+                eprintln!("クリップボードへのアクセスに失敗: {}", e);
             }
         }
     }
@@ -963,7 +1019,11 @@ impl SampoApp {
                     if ui.button("画像を開く").clicked() {
                         self.open_file_dialog(ctx);
                     }
+                    if ui.button("貼り付け").clicked() {
+                        self.paste_from_clipboard(ctx);
+                    }
                 });
+                ui.label("(Ctrl/Cmd+V でも貼り付け可)");
 
                 if let Some(path) = &self.image_path {
                     let filename = std::path::Path::new(path)
@@ -1206,6 +1266,14 @@ impl eframe::App for SampoApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Ctrlキーの状態を取得
         self.is_ctrl_pressed = ctx.input(|i| i.modifiers.ctrl);
+
+        // キーボードショートカット: Ctrl+V / Cmd+V でクリップボードから貼り付け
+        let paste_shortcut = ctx.input(|i| {
+            i.key_pressed(egui::Key::V) && i.modifiers.command
+        });
+        if paste_shortcut {
+            self.paste_from_clipboard(ctx);
+        }
 
         self.show_controls_panel(ctx);
 

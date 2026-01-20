@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+arboard = "3"
 eframe = "0.33.3"
 egui = "0.33.3"
 egui_extras = { version = "0.33.3", features = ["all_loaders"] }
