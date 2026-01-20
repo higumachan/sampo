@@ -195,6 +195,43 @@ fn snap_to_angle(start: egui::Pos2, end: egui::Pos2) -> egui::Pos2 {
     end // スナップしない場合はそのまま
 }
 
+/// 長さを指定した倍数にスナップする
+/// length: 元の長さ, multiple: 倍数（0以下で無効）
+/// 戻り値: スナップ後の長さ
+fn snap_length_to_multiple(length: f32, multiple: f32) -> f32 {
+    if multiple <= 0.0 {
+        return length;
+    }
+    (length / multiple).round() * multiple
+}
+
+/// 線分の終点を長さが倍数になるように調整する
+fn snap_line_length(start: egui::Pos2, end: egui::Pos2, multiple: f32) -> egui::Pos2 {
+    if multiple <= 0.0 {
+        return end;
+    }
+    let delta = end - start;
+    let distance = delta.length();
+    if distance < 0.001 {
+        return end;
+    }
+    let snapped_distance = snap_length_to_multiple(distance, multiple);
+    let direction = delta / distance;
+    start + direction * snapped_distance
+}
+
+/// 矩形の対角点を幅・高さが倍数になるように調整する
+fn snap_rect_dimensions(corner1: egui::Pos2, corner2: egui::Pos2, multiple: f32) -> egui::Pos2 {
+    if multiple <= 0.0 {
+        return corner2;
+    }
+    let dx = corner2.x - corner1.x;
+    let dy = corner2.y - corner1.y;
+    let snapped_width = snap_length_to_multiple(dx.abs(), multiple) * dx.signum();
+    let snapped_height = snap_length_to_multiple(dy.abs(), multiple) * dy.signum();
+    egui::pos2(corner1.x + snapped_width, corner1.y + snapped_height)
+}
+
 /// アプリケーション状態
 struct SampoApp {
     image_texture: Option<egui::TextureHandle>,
@@ -216,6 +253,7 @@ struct SampoApp {
     show_preview: bool,
     current_mouse_image_pos: Option<egui::Pos2>,
     is_ctrl_pressed: bool,
+    length_snap_multiple: f32,
 }
 
 impl Default for SampoApp {
@@ -240,6 +278,7 @@ impl Default for SampoApp {
             show_preview: true,
             current_mouse_image_pos: None,
             is_ctrl_pressed: false,
+            length_snap_multiple: 1.0,
         }
     }
 }
@@ -365,16 +404,20 @@ impl SampoApp {
                 MeasurementState::FirstPointSelected(start) => {
                     match self.measurement_mode {
                         MeasurementMode::Line => {
-                            let end_pos = if self.is_ctrl_pressed {
+                            let angle_snapped = if self.is_ctrl_pressed {
                                 snap_to_angle(*start, image_pos)
                             } else {
                                 image_pos
                             };
+                            let end_pos =
+                                snap_line_length(*start, angle_snapped, self.length_snap_multiple);
                             let measurement = Measurement::new(*start, end_pos);
                             self.measurements.push(measurement);
                         }
                         MeasurementMode::Rectangle => {
-                            let rect_measurement = RectangleMeasurement::new(*start, image_pos);
+                            let end_pos =
+                                snap_rect_dimensions(*start, image_pos, self.length_snap_multiple);
+                            let rect_measurement = RectangleMeasurement::new(*start, end_pos);
                             self.rectangle_measurements.push(rect_measurement);
                         }
                     }
@@ -484,18 +527,20 @@ impl SampoApp {
             // プレビュー描画
             if self.show_preview {
                 if let Some(mouse_pos) = self.current_mouse_image_pos {
-                    let mouse_screen = self.image_to_screen(mouse_pos, image_rect);
                     let preview_color = egui::Color32::from_rgba_unmultiplied(255, 255, 0, 150);
                     let preview_stroke = egui::Stroke::new(1.5, preview_color);
 
                     match self.measurement_mode {
                         MeasurementMode::Line => {
-                            // スナップ適用
-                            let effective_mouse_pos = if self.is_ctrl_pressed {
+                            // 角度スナップ適用（Ctrl）
+                            let angle_snapped = if self.is_ctrl_pressed {
                                 snap_to_angle(*start, mouse_pos)
                             } else {
                                 mouse_pos
                             };
+                            // 倍数スナップ適用
+                            let effective_mouse_pos =
+                                snap_line_length(*start, angle_snapped, self.length_snap_multiple);
                             let effective_mouse_screen =
                                 self.image_to_screen(effective_mouse_pos, image_rect);
 
@@ -529,11 +574,17 @@ impl SampoApp {
                             );
                         }
                         MeasurementMode::Rectangle => {
+                            // 倍数スナップ適用
+                            let effective_mouse_pos =
+                                snap_rect_dimensions(*start, mouse_pos, self.length_snap_multiple);
+                            let effective_mouse_screen =
+                                self.image_to_screen(effective_mouse_pos, image_rect);
+
                             // 矩形のプレビュー
-                            let min_x = start_screen.x.min(mouse_screen.x);
-                            let max_x = start_screen.x.max(mouse_screen.x);
-                            let min_y = start_screen.y.min(mouse_screen.y);
-                            let max_y = start_screen.y.max(mouse_screen.y);
+                            let min_x = start_screen.x.min(effective_mouse_screen.x);
+                            let max_x = start_screen.x.max(effective_mouse_screen.x);
+                            let min_y = start_screen.y.min(effective_mouse_screen.y);
+                            let max_y = start_screen.y.max(effective_mouse_screen.y);
 
                             let top_left = egui::pos2(min_x, min_y);
                             let top_right = egui::pos2(max_x, min_y);
@@ -551,8 +602,8 @@ impl SampoApp {
                             painter.circle_filled(bottom_right, point_radius * 0.7, preview_color);
 
                             // 寸法のプレビュー表示
-                            let width_px = (mouse_pos.x - start.x).abs();
-                            let height_px = (mouse_pos.y - start.y).abs();
+                            let width_px = (effective_mouse_pos.x - start.x).abs();
+                            let height_px = (effective_mouse_pos.y - start.y).abs();
                             let area_px = width_px * height_px;
 
                             let (width, height, area, unit) = match &self.calibration {
@@ -984,6 +1035,17 @@ impl SampoApp {
                 if self.measurement_mode == MeasurementMode::Line {
                     ui.label("(Ctrl押下で水平/垂直スナップ)");
                 }
+
+                ui.horizontal(|ui| {
+                    ui.label("長さスナップ:");
+                    ui.add(
+                        egui::DragValue::new(&mut self.length_snap_multiple)
+                            .speed(0.1)
+                            .range(0.0..=100.0)
+                            .suffix(" px"),
+                    );
+                });
+                ui.label("(0で無効)");
 
                 match &self.measurement_state {
                     MeasurementState::Idle => {
