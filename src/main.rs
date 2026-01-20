@@ -372,6 +372,15 @@ struct SampoApp {
     /// Redo回数（テスト用）
     #[cfg(test)]
     pending_redo_count: u32,
+    /// デバッグ用マウス位置（テスト用）- 画像座標で指定
+    #[cfg(test)]
+    debug_mouse_position: Option<egui::Pos2>,
+    /// Ctrl押下をシミュレート（テスト用）
+    #[cfg(test)]
+    debug_ctrl_pressed: bool,
+    /// プレビュー表示用に測定の始点を選択状態にする（テスト用）
+    #[cfg(test)]
+    pending_first_point: Option<egui::Pos2>,
 }
 
 impl Default for SampoApp {
@@ -406,6 +415,12 @@ impl Default for SampoApp {
             pending_undo_count: 0,
             #[cfg(test)]
             pending_redo_count: 0,
+            #[cfg(test)]
+            debug_mouse_position: None,
+            #[cfg(test)]
+            debug_ctrl_pressed: false,
+            #[cfg(test)]
+            pending_first_point: None,
         }
     }
 }
@@ -449,6 +464,17 @@ impl SampoApp {
         image_path: Option<PathBuf>,
         measurements: Vec<(egui::Pos2, egui::Pos2)>,
     ) -> Self {
+        Self::new_for_test_with_snap(cc, image_path, measurements, 0.0)
+    }
+
+    /// テスト用コンストラクタ（スナップ倍数を指定可能）
+    #[cfg(test)]
+    fn new_for_test_with_snap(
+        cc: &eframe::CreationContext<'_>,
+        image_path: Option<PathBuf>,
+        measurements: Vec<(egui::Pos2, egui::Pos2)>,
+        length_snap_multiple: f32,
+    ) -> Self {
         egui_extras::install_image_loaders(&cc.egui_ctx);
 
         // NotoSans JP フォントを設定（通常のnewと同様）
@@ -474,8 +500,7 @@ impl SampoApp {
         let mut app = Self::default();
         app.pending_image_path = image_path;
         app.pending_measurements = measurements;
-        // テスト時はスナップを無効化
-        app.length_snap_multiple = 0.0;
+        app.length_snap_multiple = length_snap_multiple;
         app
     }
 
@@ -950,6 +975,40 @@ impl SampoApp {
             }
             _ => {}
         }
+
+        // テスト用：デバッグポインタの描画
+        #[cfg(test)]
+        if let Some(debug_pos) = self.debug_mouse_position {
+            let debug_screen = self.image_to_screen(debug_pos, image_rect);
+            // 真のマウス位置を青い十字で表示
+            let cross_size = 15.0;
+            let cross_color = egui::Color32::from_rgb(0, 100, 255);
+            let cross_stroke = egui::Stroke::new(2.0, cross_color);
+            // 水平線
+            painter.line_segment(
+                [
+                    egui::pos2(debug_screen.x - cross_size, debug_screen.y),
+                    egui::pos2(debug_screen.x + cross_size, debug_screen.y),
+                ],
+                cross_stroke,
+            );
+            // 垂直線
+            painter.line_segment(
+                [
+                    egui::pos2(debug_screen.x, debug_screen.y - cross_size),
+                    egui::pos2(debug_screen.x, debug_screen.y + cross_size),
+                ],
+                cross_stroke,
+            );
+            // 座標ラベル
+            painter.text(
+                debug_screen + egui::vec2(20.0, -10.0),
+                egui::Align2::LEFT_BOTTOM,
+                format!("({:.0}, {:.0})", debug_pos.x, debug_pos.y),
+                egui::FontId::default(),
+                cross_color,
+            );
+        }
     }
 
     fn show_image_canvas(&mut self, ui: &mut egui::Ui, viewport_size: egui::Vec2) {
@@ -1008,7 +1067,15 @@ impl SampoApp {
         // クリック処理と測定線描画
         if let Some(rect) = image_rect {
             // マウス位置を画像座標に変換して保存
-            self.current_mouse_image_pos = hover_pos.map(|pos| self.screen_to_image(pos, rect));
+            // テスト用：debug_mouse_positionが設定されている場合は上書きしない
+            #[cfg(test)]
+            if self.debug_mouse_position.is_none() {
+                self.current_mouse_image_pos = hover_pos.map(|pos| self.screen_to_image(pos, rect));
+            }
+            #[cfg(not(test))]
+            {
+                self.current_mouse_image_pos = hover_pos.map(|pos| self.screen_to_image(pos, rect));
+            }
 
             if let Some(pointer_pos) = clicked_pos {
                 self.handle_canvas_click(pointer_pos, rect);
@@ -1018,7 +1085,15 @@ impl SampoApp {
             let painter = ui.painter_at(rect);
             self.draw_measurements(&painter, rect);
         } else {
-            self.current_mouse_image_pos = None;
+            // テスト用：debug_mouse_positionが設定されている場合は上書きしない
+            #[cfg(test)]
+            if self.debug_mouse_position.is_none() {
+                self.current_mouse_image_pos = None;
+            }
+            #[cfg(not(test))]
+            {
+                self.current_mouse_image_pos = None;
+            }
         }
     }
 
@@ -1494,8 +1569,33 @@ impl eframe::App for SampoApp {
             self.pending_redo_count -= 1;
         }
 
-        // Ctrlキーの状態を取得
-        self.is_ctrl_pressed = ctx.input(|i| i.modifiers.ctrl);
+        // テスト用：測定の始点選択状態を設定（プレビューテスト用）
+        #[cfg(test)]
+        if let Some(start) = self.pending_first_point.take() {
+            self.measurement_state = MeasurementState::FirstPointSelected(start);
+        }
+
+        // テスト用：デバッグマウス位置をcurrent_mouse_image_posに設定
+        #[cfg(test)]
+        if let Some(debug_pos) = self.debug_mouse_position {
+            self.current_mouse_image_pos = Some(debug_pos);
+        }
+
+        // テスト用：Ctrl押下状態をシミュレート
+        #[cfg(test)]
+        if self.debug_ctrl_pressed {
+            self.is_ctrl_pressed = true;
+        }
+
+        // Ctrlキーの状態を取得（テストでdebug_ctrl_pressedがfalseの場合も含む）
+        #[cfg(not(test))]
+        {
+            self.is_ctrl_pressed = ctx.input(|i| i.modifiers.ctrl);
+        }
+        #[cfg(test)]
+        if !self.debug_ctrl_pressed {
+            self.is_ctrl_pressed = ctx.input(|i| i.modifiers.ctrl);
+        }
 
         // キーボードショートカット: Ctrl+V / Cmd+V でクリップボードから貼り付け
         let paste_shortcut = ctx.input(|i| i.key_pressed(egui::Key::V) && i.modifiers.command);
@@ -1846,5 +1946,240 @@ mod tests {
 
         // スナップショット
         harness.snapshot("undo_then_new_action_clears_redo");
+    }
+
+    // ========================================
+    // スナップモードのシナリオテスト
+    // ========================================
+
+    /// スナップ対応テスト用ハーネスを作成するヘルパー関数
+    fn create_test_harness_with_snap(
+        measurements: Vec<(egui::Pos2, egui::Pos2)>,
+        length_snap_multiple: f32,
+    ) -> Harness<'static, SampoApp> {
+        let image_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/lenna.png");
+        Harness::builder()
+            .with_size(egui::vec2(1024.0, 768.0))
+            .build_eframe(|cc| {
+                SampoApp::new_for_test_with_snap(cc, Some(image_path), measurements, length_snap_multiple)
+            })
+    }
+
+    /// シナリオ: 角度スナップのプレビュー表示
+    /// - 始点(100, 100)を選択
+    /// - マウスを(200, 103)に移動（ほぼ水平）
+    /// - Ctrlを押した状態でプレビュー表示
+    /// - 青い十字で真のマウス位置、黄色いプレビュー線で水平にスナップされた線を表示
+    #[test]
+    fn test_angle_snap_preview() {
+        let mut harness = create_test_harness_with_snap(vec![], 0.0);
+
+        // 初期化
+        harness.run();
+
+        // 始点を選択状態にする
+        harness.state_mut().pending_first_point = Some(egui::pos2(100.0, 100.0));
+        // マウス位置を設定（ほぼ水平だが、少しずれている）
+        harness.state_mut().debug_mouse_position = Some(egui::pos2(200.0, 103.0));
+        // Ctrlを押した状態
+        harness.state_mut().debug_ctrl_pressed = true;
+
+        harness.run();
+
+        // 始点が選択されていることを確認
+        assert!(
+            matches!(
+                harness.state().measurement_state,
+                MeasurementState::FirstPointSelected(_)
+            ),
+            "始点選択状態であるべき"
+        );
+
+        // Ctrlが押されていることを確認
+        assert!(
+            harness.state().is_ctrl_pressed,
+            "Ctrl押下状態であるべき"
+        );
+
+        // スナップショット: 角度スナップのプレビュー
+        // - 青い十字: 真のマウス位置(200, 103)
+        // - 黄色いプレビュー線: (100, 100)から水平にスナップされた線
+        harness.snapshot("angle_snap_preview");
+    }
+
+    /// シナリオ: 角度スナップなしのプレビュー表示（比較用）
+    /// - Ctrl押下なしで斜めの線のプレビュー
+    #[test]
+    fn test_no_angle_snap_preview() {
+        let mut harness = create_test_harness_with_snap(vec![], 0.0);
+
+        // 初期化
+        harness.run();
+
+        // 始点を選択状態にする
+        harness.state_mut().pending_first_point = Some(egui::pos2(100.0, 100.0));
+        // マウス位置を設定（斜め）
+        harness.state_mut().debug_mouse_position = Some(egui::pos2(200.0, 130.0));
+        // Ctrlは押していない
+        harness.state_mut().debug_ctrl_pressed = false;
+
+        harness.run();
+
+        // スナップショット: 角度スナップなしのプレビュー
+        // - 青い十字: 真のマウス位置(200, 130)
+        // - 黄色いプレビュー線: 斜めのまま
+        harness.snapshot("no_angle_snap_preview");
+    }
+
+    /// シナリオ: 長さスナップが有効な状態で寸法を追加
+    /// - length_snap_multiple = 10.0 に設定
+    /// - (100, 100)から(143, 100)の線を追加（長さ43px）
+    /// - 長さは40pxにスナップされる
+    #[test]
+    fn test_length_snap() {
+        // 長さスナップを10pxに設定
+        let mut harness = create_test_harness_with_snap(vec![], 10.0);
+
+        // 初期化
+        harness.run();
+
+        // 始点を選択状態にする
+        harness.state_mut().pending_first_point = Some(egui::pos2(100.0, 100.0));
+        // マウス位置（43px離れている）
+        harness.state_mut().debug_mouse_position = Some(egui::pos2(143.0, 100.0));
+
+        harness.run();
+
+        // スナップショット: 長さスナップのプレビュー
+        // プレビュー線は40pxにスナップされているはず
+        harness.snapshot("length_snap_preview");
+
+        // 実際に寸法を追加（pending_measurementsを使うとスナップが適用されないので、
+        // handle_canvas_clickをシミュレートするために直接追加）
+        // まずは状態をリセット
+        let start = egui::pos2(100.0, 100.0);
+        let end = egui::pos2(143.0, 100.0);
+        // 長さスナップを適用
+        let snapped_end = snap_line_length(start, end, 10.0);
+        let measurement = Measurement::new(start, snapped_end);
+
+        // 寸法を追加
+        harness.state_mut().history.push_action(Action::AddLine(measurement.clone()));
+        harness.state_mut().rebuild_from_history();
+        harness.state_mut().measurement_state = MeasurementState::Idle;
+        harness.state_mut().debug_mouse_position = None;
+
+        harness.run();
+
+        // 追加された寸法の検証
+        assert_eq!(
+            harness.state().measurements.len(),
+            1,
+            "寸法が1つ追加されているべき"
+        );
+
+        // スナップされた距離を検証（40pxになるはず）
+        let added_measurement = &harness.state().measurements[0];
+        assert!(
+            (added_measurement.distance_px - 40.0).abs() < 0.1,
+            "長さは40pxにスナップされるべき（実際: {:.1}）",
+            added_measurement.distance_px
+        );
+
+        // 終点X座標を検証（100 + 40 = 140）
+        assert!(
+            (added_measurement.end.0 - 140.0).abs() < 0.1,
+            "終点Xは140であるべき（実際: {:.1}）",
+            added_measurement.end.0
+        );
+
+        harness.snapshot("length_snap_result");
+    }
+
+    /// シナリオ: 角度スナップ + 長さスナップの複合
+    /// - Ctrl押下で水平にスナップ
+    /// - 長さも10pxの倍数にスナップ
+    #[test]
+    fn test_angle_and_length_combined_snap() {
+        // 長さスナップを10pxに設定
+        let mut harness = create_test_harness_with_snap(vec![], 10.0);
+
+        // 初期化
+        harness.run();
+
+        // 始点を選択状態にする
+        harness.state_mut().pending_first_point = Some(egui::pos2(100.0, 100.0));
+        // マウス位置（斜め、長さも半端）
+        harness.state_mut().debug_mouse_position = Some(egui::pos2(153.0, 104.0));
+        // Ctrl押下で角度スナップ
+        harness.state_mut().debug_ctrl_pressed = true;
+
+        harness.run();
+
+        // スナップショット: 角度+長さスナップのプレビュー
+        // - 青い十字: 真のマウス位置(153, 104)
+        // - 黄色いプレビュー線: 水平にスナップ、長さも50pxにスナップ
+        harness.snapshot("angle_and_length_snap_preview");
+
+        // 実際に角度+長さスナップを適用した寸法を追加
+        let start = egui::pos2(100.0, 100.0);
+        let raw_end = egui::pos2(153.0, 104.0);
+        // 角度スナップを適用
+        let angle_snapped = snap_to_angle(start, raw_end);
+        // 長さスナップを適用
+        let snapped_end = snap_line_length(start, angle_snapped, 10.0);
+        let measurement = Measurement::new(start, snapped_end);
+
+        harness.state_mut().history.push_action(Action::AddLine(measurement.clone()));
+        harness.state_mut().rebuild_from_history();
+        harness.state_mut().measurement_state = MeasurementState::Idle;
+        harness.state_mut().debug_mouse_position = None;
+        harness.state_mut().debug_ctrl_pressed = false;
+
+        harness.run();
+
+        // 検証
+        assert_eq!(harness.state().measurements.len(), 1, "寸法が1つ追加されているべき");
+
+        let added = &harness.state().measurements[0];
+        // 角度スナップで水平になっているはず（Y座標が同じ）
+        assert!(
+            (added.end.1 - added.start.1).abs() < 0.1,
+            "角度スナップで水平になるべき（Y差: {:.1}）",
+            (added.end.1 - added.start.1).abs()
+        );
+        // 長さスナップで10の倍数になっているはず
+        let distance_mod_10 = added.distance_px % 10.0;
+        assert!(
+            distance_mod_10 < 0.1 || (10.0 - distance_mod_10) < 0.1,
+            "長さは10の倍数であるべき（実際: {:.1}）",
+            added.distance_px
+        );
+
+        harness.snapshot("angle_and_length_snap_result");
+    }
+
+    /// シナリオ: 垂直方向への角度スナップ
+    /// - 始点(100, 100)を選択
+    /// - マウスを(103, 200)に移動（ほぼ垂直）
+    /// - Ctrlを押した状態でプレビュー表示
+    #[test]
+    fn test_angle_snap_vertical() {
+        let mut harness = create_test_harness_with_snap(vec![], 0.0);
+
+        // 初期化
+        harness.run();
+
+        // 始点を選択状態にする
+        harness.state_mut().pending_first_point = Some(egui::pos2(100.0, 100.0));
+        // マウス位置を設定（ほぼ垂直）
+        harness.state_mut().debug_mouse_position = Some(egui::pos2(103.0, 200.0));
+        // Ctrlを押した状態
+        harness.state_mut().debug_ctrl_pressed = true;
+
+        harness.run();
+
+        // スナップショット: 垂直方向への角度スナップ
+        harness.snapshot("angle_snap_vertical");
     }
 }
