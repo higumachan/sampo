@@ -5,6 +5,8 @@
 ![Rust](https://img.shields.io/badge/Rust-2024-orange)
 ![egui](https://img.shields.io/badge/GUI-egui-blue)
 
+https://i.gyazo.com/b813fa400b420f2f58db6bd927caa6ac.mp4
+
 ## 機能
 
 ### 画像の読み込み
