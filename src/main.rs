@@ -360,6 +360,12 @@ struct SampoApp {
     is_ctrl_pressed: bool,
     length_snap_multiple: f32,
     history: History,
+    /// 起動時に読み込む画像パス（テスト用）
+    #[cfg(test)]
+    pending_image_path: Option<PathBuf>,
+    /// 起動時に追加する寸法（テスト用）
+    #[cfg(test)]
+    pending_measurements: Vec<(egui::Pos2, egui::Pos2)>,
 }
 
 impl Default for SampoApp {
@@ -386,6 +392,10 @@ impl Default for SampoApp {
             is_ctrl_pressed: false,
             length_snap_multiple: 1.0,
             history: History::default(),
+            #[cfg(test)]
+            pending_image_path: None,
+            #[cfg(test)]
+            pending_measurements: Vec::new(),
         }
     }
 }
@@ -420,6 +430,43 @@ impl SampoApp {
         cc.egui_ctx.set_fonts(fonts);
 
         Self::default()
+    }
+
+    /// テスト用コンストラクタ：初期画像パスと寸法を指定可能
+    #[cfg(test)]
+    fn new_for_test(
+        cc: &eframe::CreationContext<'_>,
+        image_path: Option<PathBuf>,
+        measurements: Vec<(egui::Pos2, egui::Pos2)>,
+    ) -> Self {
+        egui_extras::install_image_loaders(&cc.egui_ctx);
+
+        // NotoSans JP フォントを設定（通常のnewと同様）
+        let mut fonts = egui::FontDefinitions::default();
+        fonts.font_data.insert(
+            "NotoSansJP".to_owned(),
+            std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+                "../assets/NotoSansJP-Regular.ttf"
+            ))),
+        );
+        fonts
+            .families
+            .entry(egui::FontFamily::Proportional)
+            .or_default()
+            .insert(0, "NotoSansJP".to_owned());
+        fonts
+            .families
+            .entry(egui::FontFamily::Monospace)
+            .or_default()
+            .insert(0, "NotoSansJP".to_owned());
+        cc.egui_ctx.set_fonts(fonts);
+
+        let mut app = Self::default();
+        app.pending_image_path = image_path;
+        app.pending_measurements = measurements;
+        // テスト時はスナップを無効化
+        app.length_snap_multiple = 0.0;
+        app
     }
 
     fn open_file_dialog(&mut self, ctx: &egui::Context) {
@@ -1402,6 +1449,23 @@ impl SampoApp {
 
 impl eframe::App for SampoApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // テスト用：起動時に指定された画像を読み込む
+        #[cfg(test)]
+        if let Some(path) = self.pending_image_path.take() {
+            self.load_image(ctx, &path);
+        }
+
+        // テスト用：起動時に指定された寸法を追加
+        #[cfg(test)]
+        if !self.pending_measurements.is_empty() {
+            let measurements = std::mem::take(&mut self.pending_measurements);
+            for (start, end) in measurements {
+                let measurement = Measurement::new(start, end);
+                self.history.push_action(Action::AddLine(measurement));
+            }
+            self.rebuild_from_history();
+        }
+
         // Ctrlキーの状態を取得
         self.is_ctrl_pressed = ctx.input(|i| i.modifiers.ctrl);
 
@@ -1500,4 +1564,82 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| Ok(Box::new(SampoApp::new(cc)))),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui_kittest::Harness;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_load_image_and_add_dimension() {
+        // 画像パスを準備
+        let image_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/lenna.png");
+
+        // 追加する寸法を準備（画像座標）
+        let start = egui::pos2(100.0, 100.0);
+        let end = egui::pos2(200.0, 150.0);
+        let measurements = vec![(start, end)];
+
+        // eframe::Appとしてハーネスを作成（画像と寸法を初期化時に指定）
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1024.0, 768.0))
+            .build_eframe(|cc| SampoApp::new_for_test(cc, Some(image_path), measurements));
+
+        // 初回のupdateで画像と寸法が読み込まれる
+        harness.run();
+
+        // 画像が読み込まれたことを確認
+        assert!(
+            harness.state().image_texture.is_some(),
+            "画像が読み込まれていません"
+        );
+        assert!(
+            harness.state().image_dimensions.is_some(),
+            "画像サイズが設定されていません"
+        );
+
+        // 検証：寸法が1つ追加されていることを確認
+        assert_eq!(
+            harness.state().measurements.len(),
+            1,
+            "寸法が1つ追加されているべき"
+        );
+
+        // 追加された寸法の検証
+        let measurement = &harness.state().measurements[0];
+        assert!(
+            (measurement.start.0 - 100.0).abs() < 0.1,
+            "始点Xが約100であるべき（実際: {:.1}）",
+            measurement.start.0
+        );
+        assert!(
+            (measurement.start.1 - 100.0).abs() < 0.1,
+            "始点Yが約100であるべき（実際: {:.1}）",
+            measurement.start.1
+        );
+        assert!(
+            (measurement.end.0 - 200.0).abs() < 0.1,
+            "終点Xが約200であるべき（実際: {:.1}）",
+            measurement.end.0
+        );
+        assert!(
+            (measurement.end.1 - 150.0).abs() < 0.1,
+            "終点Yが約150であるべき（実際: {:.1}）",
+            measurement.end.1
+        );
+
+        // 距離の検証（100^2 + 50^2 = 10000 + 2500 = 12500, sqrt(12500) ≈ 111.8）
+        let expected_distance = ((100.0_f32).powi(2) + (50.0_f32).powi(2)).sqrt();
+        assert!(
+            (measurement.distance_px - expected_distance).abs() < 0.1,
+            "距離が約{:.1}pxであるべき（実際: {:.1}）",
+            expected_distance,
+            measurement.distance_px
+        );
+
+        // スナップショットテスト
+        harness.snapshot("load_image_and_add_dimension");
+    }
 }
