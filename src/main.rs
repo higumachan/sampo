@@ -387,10 +387,18 @@ impl SampoApp {
                 }
                 CalibrationState::FirstPointSelected(start) => {
                     let start = *start;
-                    let distance_px = start.distance(image_pos);
+                    // 角度スナップ（Ctrl）
+                    let angle_snapped = if self.is_ctrl_pressed {
+                        snap_to_angle(start, image_pos)
+                    } else {
+                        image_pos
+                    };
+                    // 倍数スナップ
+                    let end_pos = snap_line_length(start, angle_snapped, self.length_snap_multiple);
+                    let distance_px = start.distance(end_pos);
                     self.calibration_state = CalibrationState::WaitingForInput {
                         start,
-                        end: image_pos,
+                        end: end_pos,
                         distance_px,
                     };
                 }
@@ -662,6 +670,50 @@ impl SampoApp {
             CalibrationState::FirstPointSelected(start) => {
                 let start_screen = self.image_to_screen(*start, image_rect);
                 painter.circle_filled(start_screen, point_radius, egui::Color32::LIGHT_BLUE);
+
+                // キャリブレーションのプレビュー描画
+                if self.show_preview {
+                    if let Some(mouse_pos) = self.current_mouse_image_pos {
+                        let preview_color =
+                            egui::Color32::from_rgba_unmultiplied(100, 200, 255, 150);
+                        let preview_stroke = egui::Stroke::new(1.5, preview_color);
+
+                        // 角度スナップ（Ctrl）
+                        let angle_snapped = if self.is_ctrl_pressed {
+                            snap_to_angle(*start, mouse_pos)
+                        } else {
+                            mouse_pos
+                        };
+                        // 倍数スナップ
+                        let effective_mouse_pos =
+                            snap_line_length(*start, angle_snapped, self.length_snap_multiple);
+                        let effective_mouse_screen =
+                            self.image_to_screen(effective_mouse_pos, image_rect);
+
+                        // 線分のプレビュー
+                        painter.line_segment(
+                            [start_screen, effective_mouse_screen],
+                            preview_stroke,
+                        );
+                        painter.circle_filled(
+                            effective_mouse_screen,
+                            point_radius * 0.7,
+                            preview_color,
+                        );
+
+                        // 距離のプレビュー表示
+                        let distance_px = start.distance(effective_mouse_pos);
+                        let midpoint =
+                            start_screen + (effective_mouse_screen - start_screen) * 0.5;
+                        painter.text(
+                            midpoint + egui::vec2(0.0, -15.0),
+                            egui::Align2::CENTER_BOTTOM,
+                            format!("{:.1} px", distance_px),
+                            egui::FontId::default(),
+                            self.text_color,
+                        );
+                    }
+                }
             }
             CalibrationState::WaitingForInput { start, end, .. } => {
                 let start_screen = self.image_to_screen(*start, image_rect);
